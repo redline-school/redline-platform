@@ -1,9 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import type { Role } from "@/lib/types";
-import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -45,9 +44,14 @@ function normalizeNext(next: string | undefined, role: Role) {
   return null;
 }
 
+type AuthResponse = {
+  error?: string;
+  role?: Role;
+  hasSession?: boolean;
+};
+
 export function AuthForm({ next }: { next?: string }) {
   const router = useRouter();
-  const supabase = useMemo(() => createClient(), []);
 
   const [tab, setTab] = useState<"login" | "register">("login");
   const [loading, setLoading] = useState(false);
@@ -61,26 +65,28 @@ export function AuthForm({ next }: { next?: string }) {
   const [phone, setPhone] = useState("");
   const [role, setRole] = useState<Role>("student");
 
-  async function redirectAfterLogin(fallbackRole: Role) {
-    const { data: userRes } = await supabase.auth.getUser();
-    const user = userRes.user;
-    if (!user) {
-      router.push("/auth");
-      router.refresh();
-      return;
+  async function postAuth<T extends AuthResponse>(
+    path: string,
+    payload: Record<string, unknown>,
+  ) {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const json = (await response.json().catch(() => ({}))) as T;
+
+    if (!response.ok) {
+      throw new Error(json.error ?? "Authentication failed");
     }
 
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    return json;
+  }
 
-    const resolvedRole =
-      (profile?.role as Role | undefined) ??
-      (user.user_metadata?.role as Role | undefined) ??
-      fallbackRole;
-
+  function redirectAfterLogin(resolvedRole: Role) {
     const target = normalizeNext(next, resolvedRole) ?? homeForRole(resolvedRole);
     router.push(target);
     router.refresh();
@@ -92,12 +98,12 @@ export function AuthForm({ next }: { next?: string }) {
     setError(null);
     setNotice(null);
     try {
-      const { error: signInErr } = await supabase.auth.signInWithPassword({
+      const data = await postAuth<AuthResponse>("/api/auth/login", {
         email,
         password,
       });
-      if (signInErr) throw signInErr;
-      await redirectAfterLogin("student");
+
+      redirectAfterLogin(data.role ?? "student");
     } catch (err) {
       const message = err instanceof Error ? err.message : "Sign in failed";
       setError(message);
@@ -112,36 +118,21 @@ export function AuthForm({ next }: { next?: string }) {
     setError(null);
     setNotice(null);
     try {
-      const { data, error: signUpErr } = await supabase.auth.signUp({
+      const data = await postAuth<AuthResponse>("/api/auth/signup", {
         email,
         password,
-        options: {
-          data: {
-            full_name: fullName,
-            phone,
-            role,
-          },
-        },
+        fullName,
+        phone,
+        role,
       });
-      if (signUpErr) throw signUpErr;
 
-      // Best effort: write profile row (works if RLS allows / trigger exists).
-      if (data.user) {
-        await supabase.from("profiles").upsert({
-          id: data.user.id,
-          full_name: fullName,
-          phone,
-          role,
-        });
-      }
-
-      if (!data.session) {
+      if (!data.hasSession) {
         setNotice("Check your email to confirm your account, then sign in.");
         setTab("login");
         return;
       }
 
-      await redirectAfterLogin(role);
+      redirectAfterLogin(data.role ?? role);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Sign up failed";
       setError(message);
@@ -260,4 +251,3 @@ export function AuthForm({ next }: { next?: string }) {
     </Tabs>
   );
 }
-
